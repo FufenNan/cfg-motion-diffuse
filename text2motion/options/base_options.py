@@ -38,13 +38,14 @@ class BaseOptions():
         self.parser.add_argument('--dim_pri_hidden', type=int, default=1024, help='Dimension of hidden unit in prior network')
         self.parser.add_argument('--dim_pos_hidden', type=int, default=1024, help='Dimension of hidden unit in posterior network')
         self.parser.add_argument('--dim_dec_hidden', type=int, default=1024, help='Dimension of hidden unit in generator')
+        self.parser.add_argument('--cfg',action='store_true',help='Whether to use cfg or not')
+        self.parser.add_argument('--w',type=float,default=1,help='Scale for the cfg guidance')
 
         self.parser.add_argument('--dim_movement_enc_hidden', type=int, default=512,
                                  help='Dimension of hidden in AutoEncoder(encoder)')
         self.parser.add_argument('--dim_movement_dec_hidden', type=int, default=512,
                                  help='Dimension of hidden in AutoEncoder(decoder)')
         self.parser.add_argument('--dim_movement_latent', type=int, default=512, help='Dimension of motion snippet')
-
         self.initialized = True
 
 

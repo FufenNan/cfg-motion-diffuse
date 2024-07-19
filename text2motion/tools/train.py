@@ -1,3 +1,10 @@
+import sys
+import os
+
+# 获取上一层目录的路径
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+# 将上一层目录添加到sys.path
+sys.path.insert(0, parent_dir)
 import os
 from os.path import join as pjoin
 
@@ -22,7 +29,9 @@ def build_models(opt, dim_pose):
         num_layers=opt.num_layers,
         latent_dim=opt.latent_dim,
         no_clip=opt.no_clip,
-        no_eff=opt.no_eff)
+        no_eff=opt.no_eff,
+        cfg=opt.cfg,
+        w=opt.w)
     return encoder
 
 
@@ -31,7 +40,7 @@ if __name__ == '__main__':
     opt = parser.parse()
     rank, world_size = get_dist_info()
 
-    opt.device = torch.device("cuda")
+    opt.device = torch.device("cuda:3")
     torch.autograd.set_detect_anomaly(True)
 
     opt.save_root = pjoin(opt.checkpoints_dir, opt.dataset_name, opt.name)
@@ -45,7 +54,7 @@ if __name__ == '__main__':
         dist.barrier()
 
     if opt.dataset_name == 't2m':
-        opt.data_root = './data/HumanML3D'
+        opt.data_root = '/extra/xielab0/araujog/projects/Default_HumanML3D/HumanML3D'
         opt.motion_dir = pjoin(opt.data_root, 'new_joint_vecs')
         opt.text_dir = pjoin(opt.data_root, 'texts')
         opt.joints_num = 22

@@ -131,7 +131,6 @@ class LinearTemporalCrossAttention(nn.Module):
         self.value = nn.Linear(text_latent_dim, latent_dim)
         self.dropout = nn.Dropout(dropout)
         self.proj_out = StylizationBlock(latent_dim, time_embed_dim, dropout)
-    
     def forward(self, x, xf, emb):
         """
         x: B, T, D
@@ -140,6 +139,10 @@ class LinearTemporalCrossAttention(nn.Module):
         B, T, D = x.shape
         N = xf.shape[1]
         H = self.num_head
+        # print(f'xf_shape: {xf.shape}')
+        # print(f'x_shape: {x.shape}')
+        # print(f'H: {H}')
+        # print(f'emb:{emb.shape}')
         # B, T, D
         query = self.query(self.norm(x))
         # B, N, D
@@ -151,6 +154,74 @@ class LinearTemporalCrossAttention(nn.Module):
         # B, H, HD, HD
         attention = torch.einsum('bnhd,bnhl->bhdl', key, value)
         y = torch.einsum('bnhd,bhdl->bnhl', query, attention).reshape(B, T, D)
+        y = x + self.proj_out(y, emb)
+        return y
+    def forward_(self, x, xf, emb):
+        """
+        x: B, T, D
+        xf: B, N, L
+        """
+        B, T, D = x.shape
+        N = xf.shape[1]
+        H = self.num_head
+        head_dim = D // H
+
+        # Linear projections
+        query = self.query(self.norm(x))  # B, T, D
+        key = self.key(self.text_norm(xf))  # B, N, D
+        value = self.value(self.text_norm(xf))  # B, N, D
+
+        # Reshape for multi-head attention
+        query = query.view(B, T, H, head_dim)  # B, T, H, head_dim
+        key = key.view(B, N, H, head_dim)  # B, N, H, head_dim
+        value = value.view(B, N, H, head_dim)  # B, N, H, head_dim
+
+        # Transpose for multi-head attention
+        query = query.transpose(1, 2)  # B, H, T, head_dim
+        key = key.transpose(1, 2)  # B, H, N, head_dim
+        value = value.transpose(1, 2)  # B, H, N, head_dim
+
+        # Scaled dot-product attention
+        scores = torch.matmul(query, key.transpose(-2, -1)) / (head_dim ** 0.5)  # B, H, T, N
+        attention_weights = F.softmax(scores, dim=-1)  # B, H, T, N
+
+        # Compute the weighted sum of values
+        attention_output = torch.matmul(attention_weights, value)  # B, H, T, head_dim
+
+        # Transpose and reshape back to (B, T, D)
+        attention_output = attention_output.transpose(1, 2).contiguous().view(B, T, D)  # B, T, D
+
+        # Apply the final linear transformation
+        output = self.proj_out(attention_output,emb)  # B, T, D
+
+        # Add skip connection
+        y = x + output
+
+        return y
+    def forward_new(self, x, xf, emb):
+        """
+        x: B, T, D
+        xf: B, N, L
+        """
+        B, T, D = x.shape
+        N = xf.shape[1]
+        H = self.num_head
+        # B, T, D
+        query = self.query(self.norm(x))
+        # B, N, D
+        key = self.key(self.text_norm(xf))
+        #query = F.softmax(query.view(B, T, H, -1), dim=-1)
+        query = query.view(B, T, H, -1)
+        key = key.view(B, N, H, -1)
+        value = self.value(self.text_norm(xf)).view(B, N, H, -1)
+        #key = F.softmax(key.view(B, N, H, -1), dim=1)
+        attention=torch.einsum('bthd,bnhd->bhtn', query, key)/(key.shape[-1] ** 0.5)
+        attetion=F.softmax(attention, dim=-1)
+        # B, N, H, HD
+        y = torch.einsum('bhtn,bnhd->bthd', attetion, value).reshape(B, T, D)
+        # B, H, HD, HD
+        #attention = torch.einsum('bnhd,bnhl->bhdl', key, value)
+        #y = torch.einsum('bnhd,bhdl->bnhl', query, attention).reshape(B, T, D)
         y = x + self.proj_out(y, emb)
         return y
 
@@ -219,6 +290,8 @@ class TemporalSelfAttention(nn.Module):
         key = key.view(B, T, H, -1)
         # B, T, T, H
         attention = torch.einsum('bnhd,bmhd->bnmh', query, key) / math.sqrt(D // H)
+        if attention.shape[0]!= src_mask.shape[0]:
+            src_mask = src_mask.repeat(2,1,1)
         attention = attention + (1 - src_mask.unsqueeze(-1)) * -100000
         weight = self.dropout(F.softmax(attention, dim=2))
         value = self.value(self.norm(x)).view(B, T, H, -1)
@@ -301,9 +374,12 @@ class MotionTransformer(nn.Module):
                  text_num_heads=4,
                  no_clip=False,
                  no_eff=False,
+                 cfg=False,
+                 w=1,
                  **kargs):
         super().__init__()
-        
+        self.cfg = cfg
+        self.w=w
         self.num_frames = num_frames
         self.latent_dim = latent_dim
         self.ff_size = ff_size
@@ -379,18 +455,29 @@ class MotionTransformer(nn.Module):
         
     def encode_text(self, text, device):
         with torch.no_grad():
+            #[batch,77]
             text = clip.tokenize(text, truncate=True).to(device)
+            if self.cfg:
+                text_uncon=clip.tokenize([""] * len(text),truncate=True).to(device)  # [batch_size, n_ctx, d_model]
+            #[batch,77,512]
             x = self.clip.token_embedding(text).type(self.clip.dtype)  # [batch_size, n_ctx, d_model]
-
+            if self.cfg:
+                text=torch.cat([text,text_uncon])
+                x_uncon=self.clip.token_embedding(text_uncon).type(self.clip.dtype)
+                x = torch.cat([x,x_uncon])
             x = x + self.clip.positional_embedding.type(self.clip.dtype)
-            x = x.permute(1, 0, 2)  # NLD -> LND
+            x = x.permute(1, 0, 2)  # NLD -> LND 
+            #clip.transformer?
             x = self.clip.transformer(x)
             x = self.clip.ln_final(x).type(self.clip.dtype)
-
+            #[77,1,512]
         # T, B, D
+        #线性映射到latent
         x = self.text_pre_proj(x)
+        #[77,1,256]
         xf_out = self.textTransEncoder(x)
         xf_out = self.text_ln(xf_out)
+        #[77,1,256]
         xf_proj = self.text_proj(xf_out[text.argmax(dim=-1), torch.arange(xf_out.shape[1])])
         # B, T, D
         xf_out = xf_out.permute(1, 0, 2)
@@ -406,24 +493,35 @@ class MotionTransformer(nn.Module):
 
     def forward(self, x, timesteps, length=None, text=None, xf_proj=None, xf_out=None):
         """
-        x: B, T, D
+        x: B, T, D batch frame dimention
         """
+        #print(f"x shape{x.shape}")
         B, T = x.shape[0], x.shape[1]
+        time_emb=self.time_embed(timestep_embedding(timesteps, self.latent_dim))
         if text is not None and len(text) != B:
-            index = x.device.index
+            ###########################
+            index = x.device.index-3
             text = text[index * B: index * B + B]
         if xf_proj is None or xf_out is None:
             xf_proj, xf_out = self.encode_text(text, x.device)
+        if self.cfg:
+            x=torch.cat([x]*2)
+            time_emb=torch.cat([time_emb]*2)
+            #self.sequence_embedding=torch.cat([self.sequence_embedding]*2)
+        emb = time_emb+ xf_proj
+        #print(f"emb shape{emb.shape}")
 
-        emb = self.time_embed(timestep_embedding(timesteps, self.latent_dim)) + xf_proj
-
-        # B, T, latent_dim
+        # B, T, latent_dim batch frame latent
         h = self.joint_embed(x)
+        #print(f"h shape{h.shape}")
         h = h + self.sequence_embedding.unsqueeze(0)[:, :T, :]
 
         src_mask = self.generate_src_mask(T, length).to(x.device).unsqueeze(-1)
         for module in self.temporal_decoder_blocks:
             h = module(h, xf_out, emb, src_mask)
-
+        #print(f"h out shape{h.shape}")
+        if self.cfg:
+            h_con,h_uncon=h.chunk(2)
+            h=h_uncon+self.w*(h_con-h_uncon)
         output = self.out(h).view(B, T, -1).contiguous()
         return output

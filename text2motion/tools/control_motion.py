@@ -20,8 +20,8 @@ from models import MotionTransformer
 from utils.word_vectorizer import WordVectorizer, POS_enumerator
 from utils.utils import *
 from utils.motion_process import recover_from_ric
-
-
+from p2p.prompt_to_prompt import register_attention_control
+from p2p.controller import  EmptyControl,AttentionStore,AttentionReplace,AttentionRefine,AttentionReweight,get_equalizer
 def plot_t2m(data, result_path, npy_path, caption):
     joint = recover_from_ric(torch.from_numpy(data).float(), opt.joints_num).numpy()
     joint = motion_temporal_filter(joint, sigma=1)
@@ -37,12 +37,17 @@ def build_models(opt):
         num_layers=opt.num_layers,
         latent_dim=opt.latent_dim,
         no_clip=opt.no_clip,
-        no_eff=opt.no_eff)
+        no_eff=opt.no_eff,
+        cfg=True,
+        w=1)
     return encoder
+
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    parser.add_argument('--cfg',type=bool,default=True,help='Whether to use cfg or not')
+    parser.add_argument('--w',type=float,default=1,help='Scale for the cfg guidance')
     parser.add_argument('--opt_path', type=str, help='Opt path')
     parser.add_argument('--text', type=str, default="", help='Text description for motion generation')
     parser.add_argument('--motion_length', type=int, default=60, help='Number of frames for motion generation')
@@ -79,8 +84,14 @@ if __name__ == '__main__':
 
     trainer.eval_mode()
     trainer.to(opt.device)
-
-    result_dict = {}
+    prompts = ["A person is jumpping"]
+    store=AttentionStore()
+    replace = AttentionReplace(prompts, 1000, cross_replace_steps=.8, self_replace_steps=0.4,device=device)
+    refine = AttentionRefine(prompts, 1000, cross_replace_steps=.8,self_replace_steps=.4,device=device)
+    equalizer = get_equalizer(prompts[1], ("quckly",), (5,))
+    controller = AttentionReweight(prompts, 1000, cross_replace_steps=.8,self_replace_steps=.4,equalizer=equalizer)
+    register_attention_control(encoder,replace)
+    #遍历traniner.diffusion的每层
     with torch.no_grad():
         if args.motion_length != -1:
             caption = [args.text]
@@ -90,4 +101,4 @@ if __name__ == '__main__':
             motion = motion * std + mean
             title = args.text + " #%d" % motion.shape[0]
             plot_t2m(motion, args.result_path, args.npy_path, title)
-            
+    
